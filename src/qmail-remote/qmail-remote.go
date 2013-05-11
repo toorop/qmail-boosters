@@ -48,7 +48,7 @@ import (
 	"crypto/tls"
 	"flag"
 	"fmt"
-	"github.com/Toorop/altqmail/src/smtp"
+	"github.com/Toorop/qmail-boosters/src/smtp"
 	"io/ioutil"
 	"net"
 	"os"

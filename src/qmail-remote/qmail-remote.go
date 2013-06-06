@@ -73,6 +73,11 @@ type SmtpResponse struct {
 	msg  string
 }
 
+var (
+	sender     string
+	recipients []string
+)
+
 func zero() {
 	zb := make([]byte, 1)
 	zb[0] = ZEROBYTE
@@ -94,33 +99,33 @@ func dieUsage() {
 	zerodie()
 }
 
+func dieRead() {
+	fmt.Printf("Z%s:%s:Unable to read message. (#4.3.0)\n", sender, strings.Join(recipients, ","))
+	zerodie()
+}
+
 func dieControl() {
-	fmt.Print("ZUnable to read control files. (#4.3.0)\n")
+	fmt.Printf("Z%s:%s:Unable to read control files. (#4.3.0)\n", sender, strings.Join(recipients, ","))
 	zerodie()
 }
 
 func dieControlRoutes() {
-	fmt.Print("ZUnable to read control file 'routes'. Bad format or file not found (#4.3.0)\n")
+	fmt.Printf("Z%s:%s:Unable to read control file 'routes'. Bad format or file not found (#4.3.0)\n", sender, strings.Join(recipients, ","))
 	zerodie()
 }
 
-func dieRead() {
-	fmt.Print("ZUnable to read message. (#4.3.0)\n")
+func dieControlRoutesDefaultAsNameIsForbidden() {
+	fmt.Printf("Z%s:%s:Name 'default' for a route is forbidden (#4.3.0)\n", sender, strings.Join(recipients, ","))
 	zerodie()
 }
 
 func dieBadRcptTo() {
-	fmt.Print("ZUnable to parse recipient. (#4.3.0)\n")
+	fmt.Print("ZUnable to parse recipients. (#4.3.0)\n")
 	zerodie()
 }
 
 func dieBadMailFrom() {
 	fmt.Print("ZUnable to parse sender. (#4.3.0)\n")
-	zerodie()
-}
-
-func dieControlRoutesDefaultAsNameIsForbidden() {
-	fmt.Print("ZName 'default' for a route is forbidden (#4.3.0)\n")
 	zerodie()
 }
 
@@ -134,23 +139,23 @@ func dieBadSmtpResponse(response string) {
 	zerodie()
 }
 
-func tempNoCon() {
-	fmt.Print("ZSorry, I wasn't able to establish an SMTP connection. (#4.4.1)\n")
+func tempNoCon(dsn string) {
+	fmt.Printf("Z%s:%s:Sorry, I wasn't able to establish an SMTP connection to %s. (#4.4.1)\n", sender, strings.Join(recipients, ","), dsn)
 	zerodie()
 }
 
-func tempTlsFailed() {
-	fmt.Print("ZRemote accept STARTTLS but init TLS failed (#4.4.1)\n")
+func tempTlsFailed(dsn string) {
+	fmt.Printf("Z%s:%s:Remote host %s accept STARTTLS but init TLS failed (#4.4.1)\n", sender, strings.Join(recipients, ","), dsn)
 	zerodie()
 }
 
 func permNoMx(host string) {
-	fmt.Printf("DSorry, I couldn't find a mail exchanger or IP address for host %s. (#5.4.4)\n", host)
+	fmt.Printf("D%s:%s:Sorry, I couldn't find a mail exchanger or IP address for host %s. (#5.4.4)\n", sender, strings.Join(recipients, ","), host)
 	zerodie()
 }
 
 func tempAuthFailure(host, msg string) {
-	fmt.Printf("ZAuth failure (perhaps temp) dialing to host %s. %s (#5.4.4)\n", host, msg)
+	fmt.Printf("Z%s:%s:Auth failure (perhaps temp) dialing to host %s -> %s (#5.4.4)\n", sender, strings.Join(recipients, ","), host, msg)
 	zerodie()
 }
 
@@ -222,8 +227,9 @@ func getHeloHost() (heloHost string) {
 }
 
 func getRoute(sender string, remoteHost string) (route Route) {
+	var senderHost string
 
-	// if remote hots is an IP skip test
+	// if remotehost is an IP skip test
 	if net.ParseIP(remoteHost) != nil {
 		route.name = remoteHost
 		route.host = remoteHost
@@ -233,26 +239,27 @@ func getRoute(sender string, remoteHost string) (route Route) {
 
 	t := strings.Split(sender, "@")
 	if len(t) == 1 { // bounce
-		route.name = "default"
-		return
+		senderHost = "bounce"
+	} else {
+		senderHost = t[1]
 	}
-	senderHost := t[1]
+
 	routes := getRoutes()
 	routesMap := readControl("control/routemap")
+
 	for _, r1 := range routesMap {
 		parsed := strings.Split(r1, ":")
 		if (parsed[0] == "*" || parsed[0] == senderHost) && (parsed[1] == "*" || parsed[1] == remoteHost) {
 			route = routes[parsed[2]]
 			break
 		}
+		// @todo if no route matched check smtproute & moresmtproutes
 		route.name = "default"
 	}
 	return
 }
 
 func sendmail(remoteHost string, sender string, recipients []string, data *string, route Route) {
-	// use tls ?
-	//flagTls := false
 	// helloHost
 	helloHost := getHeloHost()
 
@@ -275,7 +282,7 @@ func sendmail(remoteHost string, sender string, recipients []string, data *strin
 	// Connect
 	c, err := smtp.Dial(dsn, helloHost)
 	if err != nil {
-		tempNoCon()
+		tempNoCon(dsn)
 	}
 	defer c.Quit()
 
@@ -284,7 +291,7 @@ func sendmail(remoteHost string, sender string, recipients []string, data *strin
 		var config tls.Config
 		config.InsecureSkipVerify = true
 		if err = c.StartTLS(&config); err != nil {
-			tempTlsFailed()
+			tempTlsFailed(dsn)
 		}
 	}
 
@@ -305,7 +312,7 @@ func sendmail(remoteHost string, sender string, recipients []string, data *strin
 			err := c.Auth(auth)
 			if err != nil {
 				msg := fmt.Sprintf("%s", err)
-				tempAuthFailure(route.host, msg)
+				tempAuthFailure(dsn, msg)
 			}
 		}
 	}
@@ -318,7 +325,7 @@ func sendmail(remoteHost string, sender string, recipients []string, data *strin
 		} else {
 			out("Z")
 		}
-		out(fmt.Sprintf("Connected to %s but sender was rejected. %s.\n", route.host, smtpR.msg))
+		out(fmt.Sprintf("%s:%s:Connected to %s but sender was rejected. %s.\n", sender, strings.Join(recipients, ","), dsn, smtpR.msg))
 		zerodie()
 	}
 
@@ -331,18 +338,21 @@ func sendmail(remoteHost string, sender string, recipients []string, data *strin
 			} else { // code >=400
 				out("s")
 			}
-			out(route.host)
-			out(" does not like recipient.\n")
+			out(fmt.Sprintf("%s:%s:%s:", sender, rcptto, dsn))
+			out(" does not like recipient.")
 			out(smtpR.msg)
 		} else {
 			out("r")
+			out(fmt.Sprintf("%s:%s:%s: recipient accepted.", sender, rcptto, dsn))
 			flagAtLeastOneRecipitentSuccess = true
 		}
 		zero()
 	}
 
 	if !flagAtLeastOneRecipitentSuccess {
-		out("DGiving up on ")
+		out("D")
+		//out(fmt.Sprintf("%s:%s:%s:", sender, strings.Join(recipients, ","), dsn))
+		out("Giving up on ")
 		out(route.host)
 		out("\n")
 		zerodie()
@@ -356,6 +366,7 @@ func sendmail(remoteHost string, sender string, recipients []string, data *strin
 		} else { // code >=400
 			out("Z")
 		}
+		//out(fmt.Sprintf("%s:%s:%s:", sender, strings.Join(recipients, ","), dsn))
 		out(route.host)
 		out(" failed on DATA command : ")
 		out(smtpR.msg)
@@ -366,6 +377,7 @@ func sendmail(remoteHost string, sender string, recipients []string, data *strin
 	buf := bytes.NewBufferString(*data)
 	if _, err := buf.WriteTo(w); err != nil {
 		out("Z")
+		//out(fmt.Sprintf("%s:%s:%s:", sender, strings.Join(recipients, ","), dsn))
 		out(route.host)
 		out(" failed on DATA command")
 		out("\n")
@@ -373,26 +385,30 @@ func sendmail(remoteHost string, sender string, recipients []string, data *strin
 	}
 
 	err = w.Close()
-	if err != nil {
-		smtpR := newSmtpResponse(err.Error())
+	msg := err.Error()
+	if msg[0] == 0 {
+		smtpR := newSmtpResponse(msg[1:])
 		if smtpR.code >= 500 {
 			out("D")
 		} else { // code >=400
 			out("Z")
 		}
+		//out(fmt.Sprintf("%s:%s:%s:", sender, strings.Join(recipients, ","), dsn))
 		out(route.host)
-		out(" failed after I sent the message : ")
+		out(" failed after I sent the message: ")
 		out(smtpR.msg)
 		out("\n")
 		zerodie()
 	} else {
 		out("K")
+		//out(fmt.Sprintf("%s:%s:%s:", sender, strings.Join(recipients, ","), dsn))
 		out(route.host)
-		out(" accepted message.")
+		out(" accepted message: ")
+		out(msg[1:])
 		out("\n")
 		zerodie()
 	}
-	c.Quit()
+	//c.Quit()
 }
 
 func main() {
@@ -405,8 +421,8 @@ func main() {
 		dieUsage()
 	}
 	host := strings.ToLower(args[0])
-	sender := strings.ToLower(args[1])
-	recipients := args[2:]
+	sender = strings.ToLower(args[1])
+	recipients = args[2:]
 
 	// Read mail from stdin
 	data, err := ioutil.ReadAll(os.Stdin)

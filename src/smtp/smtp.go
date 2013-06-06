@@ -14,6 +14,7 @@ package smtp
 import (
 	"crypto/tls"
 	"encoding/base64"
+	"errors"
 	"fmt"
 	"io"
 	"net"
@@ -209,9 +210,15 @@ type dataCloser struct {
 }
 
 func (d *dataCloser) Close() error {
+	var rerr error
 	d.WriteCloser.Close()
-	_, _, err := d.c.Text.ReadResponse(250)
-	return err
+	_, msg, err := d.c.Text.ReadResponse(250)
+	if err == nil {
+		rerr = errors.New(fmt.Sprintf("O%s", msg))
+	} else {
+		rerr = errors.New(fmt.Sprintf("1%s", err.Error()))
+	}
+	return rerr
 }
 
 // Data issues a DATA command to the server and returns a writer that

@@ -12,10 +12,7 @@
    distributed under the License is distributed on an "AS IS" BASIS,
    WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
    See the License for the specific language governing permissions and
-   limitations under the License.   
-
-
-	qmail-remote replacement for using mailjet as outgoing SMTP relay 
+   limitations under the License.
 
 	SYNOPSIS
           qmail-remote host sender recip [ recip ... ]
@@ -26,7 +23,7 @@
     Config files (/var/qmail/control)
 		Line begining with "#" or " " are ignored (comments)
 
-    	routes : 
+    	routes :
 		# comments
 		# name:host:port:username:passwd
 		mailjet:in.mailjet.com:25:username:password
@@ -45,15 +42,17 @@ package main
 import (
 	"bufio"
 	"bytes"
-	"crypto/tls"
+	//"crypto/tls"
 	"flag"
 	"fmt"
 	"github.com/Toorop/qmail-boosters/src/smtp"
 	"io/ioutil"
 	"net"
+	"net/mail"
 	"os"
 	"strconv"
 	"strings"
+	"time"
 )
 
 const (
@@ -63,6 +62,7 @@ const (
 type Route struct {
 	name     string
 	host     string
+	dsnHost  string // IP or Hostname
 	port     string
 	username string
 	passwd   string
@@ -76,6 +76,7 @@ type SmtpResponse struct {
 var (
 	sender     string
 	recipients []string
+	qbUuid     string
 )
 
 func zero() {
@@ -100,22 +101,22 @@ func dieUsage() {
 }
 
 func dieRead() {
-	fmt.Printf("Z%s:%s:Unable to read message. (#4.3.0)\n", sender, strings.Join(recipients, ","))
+	fmt.Printf("Z%s:%s:%s:Unable to read message. (#4.3.0)\n", qbUuid, sender, strings.Join(recipients, ","))
 	zerodie()
 }
 
 func dieControl() {
-	fmt.Printf("Z%s:%s:Unable to read control files. (#4.3.0)\n", sender, strings.Join(recipients, ","))
+	fmt.Printf("Z%s:%s:%s:Unable to read control files. (#4.3.0)\n", qbUuid, sender, strings.Join(recipients, ","))
 	zerodie()
 }
 
 func dieControlRoutes() {
-	fmt.Printf("Z%s:%s:Unable to read control file 'routes'. Bad format or file not found (#4.3.0)\n", sender, strings.Join(recipients, ","))
+	fmt.Printf("Z%s:%s:%s:Unable to read control file 'routes'. Bad format or file not found (#4.3.0)\n", qbUuid, sender, strings.Join(recipients, ","))
 	zerodie()
 }
 
 func dieControlRoutesDefaultAsNameIsForbidden() {
-	fmt.Printf("Z%s:%s:Name 'default' for a route is forbidden (#4.3.0)\n", sender, strings.Join(recipients, ","))
+	fmt.Printf("Z%s:%s:%s:Name 'default' for a route is forbidden (#4.3.0)\n", qbUuid, sender, strings.Join(recipients, ","))
 	zerodie()
 }
 
@@ -140,23 +141,45 @@ func dieBadSmtpResponse(response string) {
 }
 
 func tempNoCon(dsn string) {
-	fmt.Printf("Z%s:%s:Sorry, I wasn't able to establish an SMTP connection to %s. (#4.4.1)\n", sender, strings.Join(recipients, ","), dsn)
+	fmt.Printf("Z%s:%s:%s:Sorry, I wasn't able to establish an SMTP connection to %s. (#4.4.1)\n", qbUuid, sender, strings.Join(recipients, ","), dsn)
+	zerodie()
+}
+
+func tempTimeout(dsn string) {
+	fmt.Printf("Z%s:%s:%s:Sorry, timeout occured while speaking to %s. (#4.4.1)\n", qbUuid, sender, strings.Join(recipients, ","), dsn)
 	zerodie()
 }
 
 func tempTlsFailed(dsn string) {
-	fmt.Printf("Z%s:%s:Remote host %s accept STARTTLS but init TLS failed (#4.4.1)\n", sender, strings.Join(recipients, ","), dsn)
+	fmt.Printf("Z%s:%s:%s:Remote host %s accept STARTTLS but init TLS failed (#4.4.1)\n", qbUuid, sender, strings.Join(recipients, ","), dsn)
 	zerodie()
 }
 
 func permNoMx(host string) {
-	fmt.Printf("D%s:%s:Sorry, I couldn't find a mail exchanger or IP address for host %s. (#5.4.4)\n", sender, strings.Join(recipients, ","), host)
+	fmt.Printf("D%s:%s:%s:Sorry, I couldn't find a mail exchanger or IP address for host %s. (#5.4.4)\n", qbUuid, sender, strings.Join(recipients, ","), host)
+	zerodie()
+}
+
+func permDebug(msg string) {
+	fmt.Printf("D%s\n", msg)
 	zerodie()
 }
 
 func tempAuthFailure(host, msg string) {
-	fmt.Printf("Z%s:%s:Auth failure (perhaps temp) dialing to host %s -> %s (#5.4.4)\n", sender, strings.Join(recipients, ","), host, msg)
+	fmt.Printf("Z%s:%s:%s:Auth failure (perhaps temp) dialing to host %s -> %s (#5.4.4)\n", qbUuid, sender, strings.Join(recipients, ","), host, msg)
 	zerodie()
+}
+
+func timeout(timeout chan bool, remain int) {
+	time.Sleep(time.Duration(remain) * time.Second)
+	timeout <- true
+}
+
+func doTimeout(timeout chan bool, dsn string) {
+	s := <-timeout
+	if s == true {
+		tempTimeout(dsn)
+	}
 }
 
 func newSmtpResponse(resp string) (smtpResponse SmtpResponse) {
@@ -170,12 +193,13 @@ func newSmtpResponse(resp string) (smtpResponse SmtpResponse) {
 	return
 }
 
-func readControl(ctrlFile string) (lines []string) {
+func readControl(ctrlFile string) (lines []string, err error) {
 	//file := fmt.Sprintf("../testutils/%s", ctrlFile) // debugging purpose
 	file := fmt.Sprintf("/var/qmail/%s", ctrlFile)
 	f, err := os.Open(file)
 	if err != nil {
-		dieControl()
+		return
+		//dieControl()
 	}
 	r := bufio.NewReader(f)
 	for {
@@ -196,45 +220,53 @@ func readControl(ctrlFile string) (lines []string) {
 
 func getRoutes() map[string]Route {
 	var routes = map[string]Route{}
-	routesC := readControl("control/routes")
+	routesC, err := readControl("control/routes")
 
-	for _, route := range routesC {
-		parsed := strings.Split(route, ":")
-		if len(parsed) != 5 {
-			dieControlRoutes()
+	if err == nil {
+		for _, route := range routesC {
+			parsed := strings.Split(route, ":")
+			if len(parsed) != 5 {
+				dieControlRoutes()
+			}
+			if parsed[0] == "default" {
+				dieControlRoutesDefaultAsNameIsForbidden()
+			}
+			var r Route
+			r.name = parsed[0]
+			r.host = parsed[1]
+			r.port = parsed[2]
+			r.username = parsed[3]
+			r.passwd = parsed[4]
+			routes[r.name] = r
 		}
-		if parsed[0] == "default" {
-			dieControlRoutesDefaultAsNameIsForbidden()
-		}
-		var r Route
-		r.name = parsed[0]
-		r.host = parsed[1]
-		r.port = parsed[2]
-		r.username = parsed[3]
-		r.passwd = parsed[4]
-		routes[r.name] = r
+		// default
+		var d Route
+		d.name = "default"
+		routes["default"] = d
 	}
-	// default
-	var d Route
-	d.name = "default"
-	routes["default"] = d
 	return routes
 }
 
 func getHeloHost() (heloHost string) {
-	heloHost = strings.Trim(readControl("control/me")[0], " ")
+	t, err := readControl("control/me")
+	if err != nil {
+		dieControl()
+	}
+	heloHost = strings.Trim(t[0], " ")
 	return
 }
 
 func getRoute(sender string, remoteHost string) (route Route) {
 	var senderHost string
 
+	route.name = "default"
+
 	// if remotehost is an IP skip test
 	if net.ParseIP(remoteHost) != nil {
 		route.name = remoteHost
 		route.host = remoteHost
 		route.port = "25"
-		return route
+		return
 	}
 
 	t := strings.Split(sender, "@")
@@ -245,31 +277,63 @@ func getRoute(sender string, remoteHost string) (route Route) {
 	}
 
 	routes := getRoutes()
-	routesMap := readControl("control/routemap")
-
-	for _, r1 := range routesMap {
-		parsed := strings.Split(r1, ":")
-		if (parsed[0] == "*" || parsed[0] == senderHost) && (parsed[1] == "*" || parsed[1] == remoteHost) {
-			route = routes[parsed[2]]
-			break
+	if len(routes) > 0 {
+		routesMap, err := readControl("control/routemap")
+		if err != nil {
+			dieControl()
 		}
-		// @todo if no route matched check smtproute & moresmtproutes
-		route.name = "default"
+		for _, r1 := range routesMap {
+			parsed := strings.Split(r1, ":")
+			if (parsed[0] == "*" || parsed[0] == senderHost) && (parsed[1] == "*" || parsed[1] == remoteHost) {
+				route = routes[parsed[2]]
+				break
+			}
+		}
+		if route.name != "default" {
+			return
+		}
+	}
+
+	// try to find route in smtproutes
+	smtproutes, err := readControl("control/smtproutes")
+	if err == nil {
+		for _, l := range smtproutes {
+			s := strings.Split(l, ":")
+			if s[0] == remoteHost {
+				route.name = "smtproutes"
+				route.host = s[1]
+				route.port = "25"
+				break
+			}
+		}
 	}
 	return
 }
 
 func sendmail(remoteHost string, sender string, recipients []string, data *string, route Route) {
+
+	// @todo : try secondary MX if primary failed
+
+	// Extract qmail-booster UUID from header (need qmail-booster version of qmail-smtpd (commin soon))
+	qbUuid = "" // default
+	bufh := bytes.NewBufferString(*data)
+	mailmsg, e := mail.ReadMessage(bufh)
+	if e == nil {
+		qbUuid = mailmsg.Header.Get("X-QB-UUID")
+	}
+
 	// helloHost
 	helloHost := getHeloHost()
 
 	if route.name == "default" {
 		// get MX
 		mxs, err := net.LookupMX(remoteHost)
+		// No MX -> use A (remoteHost)
 		if err != nil {
-			permNoMx(remoteHost)
+			route.host = remoteHost
+		} else {
+			route.host = mxs[0].Host[0 : len(mxs[0].Host)-1]
 		}
-		route.host = mxs[0].Host[0 : len(mxs[0].Host)-1]
 		route.port = "25"
 	}
 
@@ -277,7 +341,23 @@ func sendmail(remoteHost string, sender string, recipients []string, data *strin
 		route.port = "25"
 	}
 
-	dsn := fmt.Sprintf("%s:%s", route.host, route.port)
+	// if hostname get IP
+	route.dsnHost = route.host
+	if net.ParseIP(route.host) == nil {
+		t, err := net.LookupHost(route.host)
+		if err != nil {
+			permNoMx(remoteHost)
+		} else {
+			route.dsnHost = t[0]
+		}
+	}
+
+	dsn := fmt.Sprintf("%s:%s", route.dsnHost, route.port)
+
+	// Timeout 60 seconds
+	timeoutCon := make(chan bool, 1)
+	go timeout(timeoutCon, 240)
+	go doTimeout(timeoutCon, dsn)
 
 	// Connect
 	c, err := smtp.Dial(dsn, helloHost)
@@ -287,12 +367,14 @@ func sendmail(remoteHost string, sender string, recipients []string, data *strin
 	defer c.Quit()
 
 	// STARTTLS ?
-	if ok, _ := c.Extension("STARTTLS"); ok {
+	// 2013-06-22 14:19:30.670252500 delivery 196893: deferral: Sorry_but_i_don't_understand_SMTP_response_:_local_error:_unexpected_message_/
+	// 2013-06-18 10:08:29.273083500 delivery 856840: deferral: Sorry_but_i_don't_understand_SMTP_response_:_failed_to_parse_certificate_from_server:_negative_serial_number_/
+	// https://code.google.com/p/go/issues/detail?id=3930
+	/*if ok, _ := c.Extension("STARTTLS"); ok {
 		var config tls.Config
 		config.InsecureSkipVerify = true
-		if err = c.StartTLS(&config); err != nil {
-			tempTlsFailed(dsn)
-		}
+		// If TLS nego failed bypass secure transmission
+		_ = c.StartTLS(&config)
 	}
 
 	// Auth
@@ -315,7 +397,7 @@ func sendmail(remoteHost string, sender string, recipients []string, data *strin
 				tempAuthFailure(dsn, msg)
 			}
 		}
-	}
+	}*/
 
 	if err := c.Mail(sender); err != nil {
 		c.Quit()
@@ -325,7 +407,7 @@ func sendmail(remoteHost string, sender string, recipients []string, data *strin
 		} else {
 			out("Z")
 		}
-		out(fmt.Sprintf("%s:%s:Connected to %s but sender was rejected. %s.\n", sender, strings.Join(recipients, ","), dsn, smtpR.msg))
+		out(fmt.Sprintf("%s:%s:%s:Connected to %s but sender was rejected. %s.\n", qbUuid, sender, strings.Join(recipients, ","), dsn, smtpR.msg))
 		zerodie()
 	}
 
@@ -338,12 +420,12 @@ func sendmail(remoteHost string, sender string, recipients []string, data *strin
 			} else { // code >=400
 				out("s")
 			}
-			out(fmt.Sprintf("%s:%s:%s:", sender, rcptto, dsn))
+			out(fmt.Sprintf("%s:%s:%s:%s:", qbUuid, sender, rcptto, dsn))
 			out(" does not like recipient.")
 			out(smtpR.msg)
 		} else {
 			out("r")
-			out(fmt.Sprintf("%s:%s:%s: recipient accepted.", sender, rcptto, dsn))
+			out(fmt.Sprintf("%s:%s:%s:%s:recipient accepted.", qbUuid, sender, rcptto, dsn))
 			flagAtLeastOneRecipitentSuccess = true
 		}
 		zero()
@@ -353,7 +435,7 @@ func sendmail(remoteHost string, sender string, recipients []string, data *strin
 		out("D")
 		//out(fmt.Sprintf("%s:%s:%s:", sender, strings.Join(recipients, ","), dsn))
 		out("Giving up on ")
-		out(route.host)
+		out(route.dsnHost)
 		out("\n")
 		zerodie()
 	}
@@ -378,7 +460,7 @@ func sendmail(remoteHost string, sender string, recipients []string, data *strin
 	if _, err := buf.WriteTo(w); err != nil {
 		out("Z")
 		//out(fmt.Sprintf("%s:%s:%s:", sender, strings.Join(recipients, ","), dsn))
-		out(route.host)
+		out(route.dsnHost)
 		out(" failed on DATA command")
 		out("\n")
 		zerodie()
@@ -394,7 +476,7 @@ func sendmail(remoteHost string, sender string, recipients []string, data *strin
 			out("Z")
 		}
 		//out(fmt.Sprintf("%s:%s:%s:", sender, strings.Join(recipients, ","), dsn))
-		out(route.host)
+		out(route.dsnHost)
 		out(" failed after I sent the message: ")
 		out(smtpR.msg)
 		out("\n")
@@ -402,18 +484,17 @@ func sendmail(remoteHost string, sender string, recipients []string, data *strin
 	} else {
 		out("K")
 		//out(fmt.Sprintf("%s:%s:%s:", sender, strings.Join(recipients, ","), dsn))
-		out(route.host)
+		out(route.dsnHost)
 		out(" accepted message: ")
 		out(msg[1:])
 		out("\n")
 		zerodie()
 	}
-	//c.Quit()
+	c.Quit()
 }
 
 func main() {
-
-	// Parse command-line 
+	// Parse command-line
 	// qmail-remote host sender recip [ recip ... ]
 	flag.Parse()
 	args := flag.Args()

@@ -38,28 +38,57 @@ type Client struct {
 	ext map[string]string
 	// supported auth mechanisms
 	auth []string
+	// Local addresse
+	Laddr string
+	// Remote address
+	Raddr string
+	// Remote port
+	Rport string
 }
 
 // Dial returns a new Client connected to an SMTP server at addr.
-func Dial(addr string, heloHost string) (*Client, error) {
-	conn, err := net.Dial("tcp", addr)
+// change dial method to allow localAddr parameter
+// func DialTCP(net string, laddr, raddr *TCPAddr) (*TCPConn, error)
+func Dial(remoteAddr string, localAddr string, heloHost string) (*Client, error) {
+	raddr, err := net.ResolveTCPAddr("tcp", remoteAddr)
 	if err != nil {
 		return nil, err
 	}
-	host := addr[:strings.Index(addr, ":")]
+
+	var laddr *net.TCPAddr
+
+	if len(localAddr) > 0 {
+		laddr, err = net.ResolveTCPAddr("tcp", fmt.Sprintf("%s:0", localAddr))
+		if err != nil {
+			return nil, err
+		}
+	}
+
+	conn, err := net.DialTCP("tcp", laddr, raddr)
+
+	//conn, err := net.Dial("tcp", addr)
+	if err != nil {
+		return nil, err
+	}
+	host := remoteAddr[:strings.Index(remoteAddr, ":")]
 	return NewClient(conn, host, heloHost)
 }
 
 // NewClient returns a new Client using an existing connection and host as a
 // server name to be used when authenticating.
 func NewClient(conn net.Conn, host string, heloHost string) (*Client, error) {
+	// Remote port
+	/*_, rPort, err := net.SplitHostPort(host)
+	if err != nil {
+		return nil, err
+	}*/
 	text := textproto.NewConn(conn)
 	_, _, err := text.ReadResponse(220)
 	if err != nil {
 		text.Close()
 		return nil, err
 	}
-	c := &Client{Text: text, conn: conn, serverName: host, heloHost: heloHost}
+	c := &Client{Text: text, conn: conn, serverName: host, heloHost: heloHost, Laddr: conn.LocalAddr().String(), Raddr: conn.RemoteAddr().String()}
 	err = c.ehlo()
 	if err != nil {
 		err = c.helo()
@@ -236,7 +265,7 @@ func (c *Client) Data() (io.WriteCloser, error) {
 // SendMail connects to the server at addr, switches to TLS if possible,
 // authenticates with mechanism a if possible, and then sends an email from
 // address from, to addresses to, with message msg.
-func SendMail(addr string, a Auth, from string, to []string, msg []byte, heloHost string) error {
+/*func SendMail(addr string, a Auth, from string, to []string, msg []byte, heloHost string) error {
 	c, err := Dial(addr, heloHost)
 	if err != nil {
 		return err
@@ -274,7 +303,7 @@ func SendMail(addr string, a Auth, from string, to []string, msg []byte, heloHos
 		return err
 	}
 	return c.Quit()
-}
+}*/
 
 // Extension reports whether an extension is support by the server.
 // The extension name is case-insensitive. If the extension is supported,

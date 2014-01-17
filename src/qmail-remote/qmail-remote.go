@@ -314,7 +314,7 @@ func sendmail(remoteHost string, sender string, recipients []string, data *strin
 
 	// @todo : try secondary MX if primary failed
 
-	// Extract qmail-booster UUID from header (need qmail-booster version of qmail-smtpd (commin soon))
+	// Extract qmail-booster UUID from header (need qmail-booster version of qmail-smtpd (coming soon))
 	qbUuid = "" // default
 	bufh := bytes.NewBufferString(*data)
 	mailmsg, e := mail.ReadMessage(bufh)
@@ -468,7 +468,7 @@ func sendmail(remoteHost string, sender string, recipients []string, data *strin
 
 	err = w.Close()
 	msg := err.Error()
-	if msg[0] == 0 {
+	if msg[0] == 49 { // 1Ò
 		smtpR := newSmtpResponse(msg[1:])
 		if smtpR.code >= 500 {
 			out("D")

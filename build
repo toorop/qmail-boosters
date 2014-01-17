@@ -1,9 +1,0 @@
-#  Package smtp
-cd src/smtp
-go build
-go install
-cd ../../
-pwd
-
-# qmail-remote
-GOOS=linux GOARCH=386 CGO_ENABLED=0 go build -o bin/qmail-remote src/qmail-remote/qmail-remote.go

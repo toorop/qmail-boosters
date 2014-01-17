@@ -42,11 +42,14 @@ package main
 import (
 	"bufio"
 	"bytes"
-	//"crypto/tls"
+	"container/list"
+	"crypto/tls"
+	"errors"
 	"flag"
 	"fmt"
 	"github.com/Toorop/qmail-boosters/src/smtp"
 	"io/ioutil"
+	"math/rand"
 	"net"
 	"net/mail"
 	"os"
@@ -60,12 +63,13 @@ const (
 )
 
 type Route struct {
-	name     string
-	host     string
-	dsnHost  string // IP or Hostname
-	port     string
+	name  string
+	rAddr string // remote IPs or Hostnames
+	//rPort    string
+	lAddr    string // local ourtgoing IPs
 	username string
 	passwd   string
+	qrHost   string // host in qmail-remote cmd
 }
 
 type SmtpResponse struct {
@@ -105,8 +109,8 @@ func dieRead() {
 	zerodie()
 }
 
-func dieControl() {
-	fmt.Printf("Z%s:%s:%s:Unable to read control files. (#4.3.0)\n", qbUuid, sender, strings.Join(recipients, ","))
+func dieControl(msg string) {
+	fmt.Printf("Z%s:%s:%s:Unable to read control files: %s (#4.3.0)\n", qbUuid, sender, strings.Join(recipients, ","), msg)
 	zerodie()
 }
 
@@ -140,8 +144,8 @@ func dieBadSmtpResponse(response string) {
 	zerodie()
 }
 
-func tempNoCon(dsn string) {
-	fmt.Printf("Z%s:%s:%s:Sorry, I wasn't able to establish an SMTP connection to %s. (#4.4.1)\n", qbUuid, sender, strings.Join(recipients, ","), dsn)
+func tempNoCon(dsn string, err error) {
+	fmt.Printf("Z%s:%s:%s:Sorry, I wasn't able to establish an SMTP connection to remote host(s) %s. %s (#4.4.1)\n", qbUuid, sender, strings.Join(recipients, ","), dsn, err)
 	zerodie()
 }
 
@@ -150,8 +154,8 @@ func tempTimeout(dsn string) {
 	zerodie()
 }
 
-func tempTlsFailed(dsn string) {
-	fmt.Printf("Z%s:%s:%s:Remote host %s accept STARTTLS but init TLS failed (#4.4.1)\n", qbUuid, sender, strings.Join(recipients, ","), dsn)
+func tempTlsFailed(lAddr, dsn, msg string) {
+	fmt.Printf("Z%s:%s->%s:%s:%s:Remote host accept STARTTLS but init TLS failed - %s(#4.4.1)\n", qbUuid, lAddr, dsn, sender, strings.Join(recipients, ","), msg)
 	zerodie()
 }
 
@@ -160,13 +164,23 @@ func permNoMx(host string) {
 	zerodie()
 }
 
+func permResolveHostFailed(host string) {
+	fmt.Printf("D%s:%s:%s:Sorry, I couldn't resolve this hostname %s. (#5.4.4)\n", qbUuid, sender, strings.Join(recipients, ","), host)
+	zerodie()
+}
+
+func permNoInterface(iface string) {
+	fmt.Printf("D%s:%s:%s:Sorry, I couldn't find local interface %s. (#5.4.4)\n", qbUuid, sender, strings.Join(recipients, ","), iface)
+	zerodie()
+}
+
 func permDebug(msg string) {
 	fmt.Printf("D%s\n", msg)
 	zerodie()
 }
 
-func tempAuthFailure(host, msg string) {
-	fmt.Printf("Z%s:%s:%s:Auth failure (perhaps temp) dialing to host %s -> %s (#5.4.4)\n", qbUuid, sender, strings.Join(recipients, ","), host, msg)
+func tempAuthFailure(lAddr, dsn, msg string) {
+	fmt.Printf("Z%s:%s->%s:%s:%s:Auth failure (perhaps temp) dialing to host : %s (#5.4.4)\n", qbUuid, lAddr, dsn, sender, strings.Join(recipients, ","), msg)
 	zerodie()
 }
 
@@ -193,13 +207,12 @@ func newSmtpResponse(resp string) (smtpResponse SmtpResponse) {
 	return
 }
 
-func readControl(ctrlFile string) (lines []string, err error) {
+func readControl(ctrlFile string) (lines []string) {
 	//file := fmt.Sprintf("../testutils/%s", ctrlFile) // debugging purpose
 	file := fmt.Sprintf("/var/qmail/%s", ctrlFile)
 	f, err := os.Open(file)
 	if err != nil {
-		return
-		//dieControl()
+		dieControl(file)
 	}
 	r := bufio.NewReader(f)
 	for {
@@ -218,40 +231,8 @@ func readControl(ctrlFile string) (lines []string, err error) {
 	return
 }
 
-func getRoutes() map[string]Route {
-	var routes = map[string]Route{}
-	routesC, err := readControl("control/routes")
-
-	if err == nil {
-		for _, route := range routesC {
-			parsed := strings.Split(route, ":")
-			if len(parsed) != 5 {
-				dieControlRoutes()
-			}
-			if parsed[0] == "default" {
-				dieControlRoutesDefaultAsNameIsForbidden()
-			}
-			var r Route
-			r.name = parsed[0]
-			r.host = parsed[1]
-			r.port = parsed[2]
-			r.username = parsed[3]
-			r.passwd = parsed[4]
-			routes[r.name] = r
-		}
-		// default
-		var d Route
-		d.name = "default"
-		routes["default"] = d
-	}
-	return routes
-}
-
 func getHeloHost() (heloHost string) {
-	t, err := readControl("control/me")
-	if err != nil {
-		dieControl()
-	}
+	t := readControl("control/me")
 	heloHost = strings.Trim(t[0], " ")
 	return
 }
@@ -260,12 +241,12 @@ func getRoute(sender string, remoteHost string) (route Route) {
 	var senderHost string
 
 	route.name = "default"
+	route.qrHost = remoteHost
 
 	// if remotehost is an IP skip test
 	if net.ParseIP(remoteHost) != nil {
 		route.name = remoteHost
-		route.host = remoteHost
-		route.port = "25"
+		route.rAddr = fmt.Sprintf("%s:25", remoteHost)
 		return
 	}
 
@@ -276,105 +257,232 @@ func getRoute(sender string, remoteHost string) (route Route) {
 		senderHost = t[1]
 	}
 
-	routes := getRoutes()
-	if len(routes) > 0 {
-		routesMap, err := readControl("control/routemap")
-		if err != nil {
-			dieControl()
-		}
-		for _, r1 := range routesMap {
-			parsed := strings.Split(r1, ":")
-			if (parsed[0] == "*" || parsed[0] == senderHost) && (parsed[1] == "*" || parsed[1] == remoteHost) {
-				route = routes[parsed[2]]
-				break
-			}
-		}
-		if route.name != "default" {
-			return
+	//routes := getRoutes()
+	// Find route name in route map
+	routesMap := readControl("control/routemap")
+	for _, r1 := range routesMap {
+		parsed := strings.Split(r1, ";")
+		if (parsed[0] == "*" || parsed[0] == senderHost) && (parsed[1] == "*" || parsed[1] == remoteHost) {
+			route.name = parsed[2]
+			break
 		}
 	}
 
+	// Find route from control/routes
+	routesC := readControl("control/routes")
+	for _, strRoute := range routesC {
+		parsedRoute := strings.Split(strRoute, ";")
+		if parsedRoute[0] == route.name {
+			route.lAddr = parsedRoute[1]
+			route.rAddr = parsedRoute[2]
+			route.username = parsedRoute[3]
+			route.passwd = parsedRoute[4]
+			break
+		}
+	}
+
+	// Route found
+	if route.name != "default" && route.rAddr != "" {
+		return
+	}
+
 	// try to find route in smtproutes
-	smtproutes, err := readControl("control/smtproutes")
-	if err == nil {
-		for _, l := range smtproutes {
-			s := strings.Split(l, ":")
-			if s[0] == remoteHost {
-				route.name = "smtproutes"
-				route.host = s[1]
-				route.port = "25"
-				break
+	smtproutes := readControl("control/smtproutes")
+	for _, l := range smtproutes {
+		s := strings.Split(l, ":")
+		if s[0] == remoteHost {
+			route.name = "smtproutes"
+			route.rAddr = fmt.Sprintf("%s:25", s[1])
+			break
+		}
+	}
+	return
+}
+
+// Return route form MX records
+// cat = failover | roundrobin
+func getMxRoute(host, sep string) (route string) {
+	mxs, err := net.LookupMX(host)
+	if err != nil {
+		route = host
+	} else {
+		for i, mx := range mxs {
+			if i == 0 {
+				route = fmt.Sprintf("%s:25", mx.Host[0:len(mx.Host)-1])
+			} else {
+				route = fmt.Sprintf("%s%s%s:25", route, sep, mx.Host[0:len(mx.Host)-1])
 			}
 		}
 	}
 	return
 }
 
-func sendmail(remoteHost string, sender string, recipients []string, data *string, route Route) {
+// toto.com:25 -> 111.111.111.111:25
+func hostPortToIpPort(dsnHost string) (dnsIp string) {
+	host, port, _ := net.SplitHostPort(dsnHost)
+	// If hostname get IP
+	if net.ParseIP(host) == nil {
+		t, err := net.LookupHost(host)
+		if err != nil {
+			permResolveHostFailed(host)
+		} else {
+			return net.JoinHostPort(t[0], port)
+		}
+	}
+	return dsnHost
+}
 
-	// @todo : try secondary MX if primary failed
+func getDefaultLocalAddr() (lAddr string) {
+	ip := readControl("control/defaultoutgoingip")
+	if len(ip) < 1 {
+		dieControl("Bad format for defaultOutgoingIp file")
+	}
+	return ip[0]
+}
 
+func newSmtpClient(route Route) (client *smtp.Client, err error) {
+	var tAddrs []string // temp address slices
+	var heloHost string
+	lAddrs := list.New() // Local addresses
+	rAddrs := list.New() // Remote addresses
+
+	// remote dsn (ip:port)
+	//rdsn := fmt.Sprintf("%s:%s", route.rAddr, route.rPort)
+
+	///////////////////////////////
+	// Locals address
+
+	// Si il n'y a pas d'adresse locale il faut prendre celle de la eth0
+	if route.lAddr == "" {
+		route.lAddr = getDefaultLocalAddr()
+	}
+
+	// failover ?
+	tAddrs = strings.Split(route.lAddr, "&")
+	if len(tAddrs) > 1 {
+		for _, a := range tAddrs {
+			// If hostname, get IP
+			lAddrs.PushBack(a)
+		}
+	}
+	// round robin
+	if lAddrs.Len() == 0 { // no failover
+		tAddrs = strings.Split(route.lAddr, "|")
+		if len(tAddrs) > 1 {
+			var i int
+			rand.Seed(time.Now().UTC().UnixNano())
+			for len(tAddrs) > 0 {
+				i = rand.Intn(len(tAddrs))
+				lAddrs.PushBack(tAddrs[i])
+				tAddrs = append(tAddrs[:i], tAddrs[i+1:]...)
+			}
+		}
+	}
+	// Unique IP
+	if lAddrs.Len() == 0 {
+		lAddrs.PushBack(route.lAddr)
+	}
+
+	///////////////////////////////
+	// Remote address
+	// If no route specified use MX
+	if route.rAddr == "" {
+		route.rAddr = getMxRoute(route.qrHost, "&")
+	}
+
+	// failover ?
+	tAddrs = strings.Split(route.rAddr, "&")
+	if len(tAddrs) > 1 {
+		for _, tAddr := range tAddrs {
+			rAddrs.PushBack(hostPortToIpPort(tAddr))
+		}
+	}
+
+	// round robin
+	if rAddrs.Len() == 0 { // -> no failover
+		tAddrs = strings.Split(route.rAddr, "|")
+		if len(tAddrs) > 1 {
+			var i int
+			rand.Seed(time.Now().UTC().UnixNano())
+			for len(tAddrs) > 0 {
+				i = rand.Intn(len(tAddrs))
+				rAddrs.PushBack(hostPortToIpPort(tAddrs[i]))
+				tAddrs = append(tAddrs[:i], tAddrs[i+1:]...)
+			}
+		}
+	}
+	// Unique IP/hostname
+	if rAddrs.Len() == 0 { // -> no failover & no roud robin
+		rAddrs.PushBack(hostPortToIpPort(route.rAddr))
+	}
+
+	// Connect ands return client
+	for lAddr := lAddrs.Front(); lAddr != nil; lAddr = lAddr.Next() {
+		// Get HELO host
+		heloHosts, err := net.LookupAddr(lAddr.Value.(string))
+		if err != nil {
+			heloHost = getHeloHost()
+		} else {
+			heloHost = heloHosts[0]
+		}
+		//  Try all r address
+		//  //rdsn := fmt.Sprintf("%s:%s", route.rAddr, route.rPort)
+		for rAddr := rAddrs.Front(); rAddr != nil; rAddr = rAddr.Next() {
+			rHost, rPort, _ := net.SplitHostPort(rAddr.Value.(string))
+			client, err = smtp.Dial(fmt.Sprintf("%s:%s", rHost, rPort), lAddr.Value.(string), heloHost)
+			if err == nil {
+				return client, err
+			}
+		}
+	}
+	return client, errors.New("All local address have been tested")
+}
+
+func sendmail(sender string, recipients []string, data *string, route Route) {
 	// Extract qmail-booster UUID from header (need qmail-booster version of qmail-smtpd (coming soon))
-	qbUuid = "" // default
 	bufh := bytes.NewBufferString(*data)
 	mailmsg, e := mail.ReadMessage(bufh)
 	if e == nil {
 		qbUuid = mailmsg.Header.Get("X-QB-UUID")
 	}
-
-	// helloHost
-	helloHost := getHeloHost()
-
-	if route.name == "default" {
-		// get MX
-		mxs, err := net.LookupMX(remoteHost)
-		// No MX -> use A (remoteHost)
-		if err != nil {
-			route.host = remoteHost
-		} else {
-			route.host = mxs[0].Host[0 : len(mxs[0].Host)-1]
-		}
-		route.port = "25"
+	if qbUuid == "" {
+		qbUuid = "nouuid" // default
 	}
 
-	if route.port == "" {
-		route.port = "25"
-	}
-
-	// if hostname get IP
-	route.dsnHost = route.host
-	if net.ParseIP(route.host) == nil {
-		t, err := net.LookupHost(route.host)
-		if err != nil {
-			permNoMx(remoteHost)
-		} else {
-			route.dsnHost = t[0]
-		}
-	}
-
-	dsn := fmt.Sprintf("%s:%s", route.dsnHost, route.port)
-
-	// Timeout 60 seconds
+	// Timeout connect 240 seconds
 	timeoutCon := make(chan bool, 1)
 	go timeout(timeoutCon, 240)
-	go doTimeout(timeoutCon, dsn)
+	go doTimeout(timeoutCon, fmt.Sprintf("%s", route.rAddr))
 
 	// Connect
-	c, err := smtp.Dial(dsn, helloHost)
+	c, err := newSmtpClient(route)
+
 	if err != nil {
-		tempNoCon(dsn)
+		tempNoCon(fmt.Sprintf("%s", route.rAddr), err)
 	}
+	dsn := fmt.Sprintf("%s:%s", c.Raddr, c.Rport)
 	defer c.Quit()
+	// Timeout sessions TODO
 
 	// STARTTLS ?
 	// 2013-06-22 14:19:30.670252500 delivery 196893: deferral: Sorry_but_i_don't_understand_SMTP_response_:_local_error:_unexpected_message_/
 	// 2013-06-18 10:08:29.273083500 delivery 856840: deferral: Sorry_but_i_don't_understand_SMTP_response_:_failed_to_parse_certificate_from_server:_negative_serial_number_/
 	// https://code.google.com/p/go/issues/detail?id=3930
-	/*if ok, _ := c.Extension("STARTTLS"); ok {
+	// @4000000052d2c8282a519864 delivery 33: deferral: 7da4493fa3fe4b738468241a9e51c769:91.121.228.128:44432->213.199.154.23:25:caeljacqueline@free.fr:eric.escoffier@groupe-avantiel.com:Remote_host_accept_STARTTLS_but_init_TLS_failed_-_local_error:_unexpected_message(#4.4.1)/
+	if ok, _ := c.Extension("STARTTLS"); ok {
 		var config tls.Config
 		config.InsecureSkipVerify = true
 		// If TLS nego failed bypass secure transmission
-		_ = c.StartTLS(&config)
+		err = c.StartTLS(&config)
+		if err != nil { // fallback to no TLS
+			c.Quit()
+			c, err = newSmtpClient(route)
+			if err != nil {
+				tempNoCon(dsn, err)
+			}
+			defer c.Quit()
+			//tempTlsFailed(c.Laddr, dsn, err.Error())
+		}
 	}
 
 	// Auth
@@ -385,7 +493,7 @@ func sendmail(remoteHost string, sender string, recipients []string, data *strin
 		if strings.Contains(auths, "CRAM-MD5") {
 			auth = smtp.CRAMMD5Auth(route.username, route.passwd)
 		} else { // PLAIN
-			auth = smtp.PlainAuth("", route.username, route.passwd, route.host)
+			auth = smtp.PlainAuth("", route.username, route.passwd, route.rAddr)
 		}
 	}
 
@@ -394,10 +502,10 @@ func sendmail(remoteHost string, sender string, recipients []string, data *strin
 			err := c.Auth(auth)
 			if err != nil {
 				msg := fmt.Sprintf("%s", err)
-				tempAuthFailure(dsn, msg)
+				tempAuthFailure(c.Laddr, dsn, msg)
 			}
 		}
-	}*/
+	}
 
 	if err := c.Mail(sender); err != nil {
 		c.Quit()
@@ -407,7 +515,7 @@ func sendmail(remoteHost string, sender string, recipients []string, data *strin
 		} else {
 			out("Z")
 		}
-		out(fmt.Sprintf("%s:%s:%s:Connected to %s but sender was rejected. %s.\n", qbUuid, sender, strings.Join(recipients, ","), dsn, smtpR.msg))
+		out(fmt.Sprintf("%s:%s->%s:%s:%s:Connected to remote host but sender was rejected. %s.\n", qbUuid, c.Laddr, dsn, sender, strings.Join(recipients, ","), smtpR.msg))
 		zerodie()
 	}
 
@@ -420,12 +528,12 @@ func sendmail(remoteHost string, sender string, recipients []string, data *strin
 			} else { // code >=400
 				out("s")
 			}
-			out(fmt.Sprintf("%s:%s:%s:%s:", qbUuid, sender, rcptto, dsn))
+			out(fmt.Sprintf("%s:%s->%s:%s:%s:", qbUuid, c.Laddr, dsn, sender, rcptto))
 			out(" does not like recipient.")
 			out(smtpR.msg)
 		} else {
 			out("r")
-			out(fmt.Sprintf("%s:%s:%s:%s:recipient accepted.", qbUuid, sender, rcptto, dsn))
+			out(fmt.Sprintf("%s:%s->%s:%s:%s:recipient accepted.", qbUuid, c.Laddr, dsn, sender, rcptto))
 			flagAtLeastOneRecipitentSuccess = true
 		}
 		zero()
@@ -435,7 +543,7 @@ func sendmail(remoteHost string, sender string, recipients []string, data *strin
 		out("D")
 		//out(fmt.Sprintf("%s:%s:%s:", sender, strings.Join(recipients, ","), dsn))
 		out("Giving up on ")
-		out(route.dsnHost)
+		out(route.rAddr)
 		out("\n")
 		zerodie()
 	}
@@ -448,8 +556,7 @@ func sendmail(remoteHost string, sender string, recipients []string, data *strin
 		} else { // code >=400
 			out("Z")
 		}
-		//out(fmt.Sprintf("%s:%s:%s:", sender, strings.Join(recipients, ","), dsn))
-		out(route.host)
+		//out(fmt.Sprintf("%s:%s->%s:%s:%s:", qbUuid, c.Laddr, dsn, sender, strings.Join(recipients, ",")))
 		out(" failed on DATA command : ")
 		out(smtpR.msg)
 		out("\n")
@@ -459,8 +566,8 @@ func sendmail(remoteHost string, sender string, recipients []string, data *strin
 	buf := bytes.NewBufferString(*data)
 	if _, err := buf.WriteTo(w); err != nil {
 		out("Z")
-		//out(fmt.Sprintf("%s:%s:%s:", sender, strings.Join(recipients, ","), dsn))
-		out(route.dsnHost)
+		//out(fmt.Sprintf("%s:%s->%s:%s:%s:", qbUuid, c.Laddr, dsn, sender, strings.Join(recipients, ",")))
+		//out(route.rAddr)
 		out(" failed on DATA command")
 		out("\n")
 		zerodie()
@@ -475,16 +582,16 @@ func sendmail(remoteHost string, sender string, recipients []string, data *strin
 		} else { // code >=400
 			out("Z")
 		}
-		//out(fmt.Sprintf("%s:%s:%s:", sender, strings.Join(recipients, ","), dsn))
-		out(route.dsnHost)
+		//out(fmt.Sprintf("%s:%s->%s:%s:%s:", qbUuid, c.Laddr, dsn, sender, strings.Join(recipients, ",")))
+		//out(route.rAddr)
 		out(" failed after I sent the message: ")
 		out(smtpR.msg)
 		out("\n")
 		zerodie()
 	} else {
 		out("K")
-		//out(fmt.Sprintf("%s:%s:%s:", sender, strings.Join(recipients, ","), dsn))
-		out(route.dsnHost)
+		//out(fmt.Sprintf("%s:%s->%s:%s:%s:", qbUuid, c.Laddr, dsn, sender, strings.Join(recipients, ",")))
+		//out(route.rAddr)
 		out(" accepted message: ")
 		out(msg[1:])
 		out("\n")
@@ -516,6 +623,6 @@ func main() {
 	route := getRoute(sender, host)
 
 	// Send mail in the same order that in recipients list VERY IMPORTANT !!
-	sendmail(host, sender, recipients, &mailData, route)
+	sendmail(sender, recipients, &mailData, route)
 
 }

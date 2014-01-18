@@ -25,16 +25,22 @@
 
     	routes :
 		# comments
-		# name:host:port:username:passwd
+		# Name;LocalAddresses;RemotesAddresses;username;passwd
 		mailjet:in.mailjet.com:25:username:password
 		pm:mx5.protecmail.com:25::
 
     	routemap
-		#senderHost:recipientHost:routeName
+    	# comment
+		#senderHost;recipientHost;routeName
 		*:protecmail.com:pm
 		*:toorop.fr:pm
 		*:ovh.com:mx1.ovh.net
 		*:*:mailjet
+
+		defaultoutgoingip
+		111.111.111.111
+
+
 */
 
 package main
@@ -386,7 +392,7 @@ func newSmtpClient(route Route) (client *smtp.Client, err error) {
 	///////////////////////////////
 	// Remote address
 	// If no route specified use MX
-	if route.rAddr == "" {
+	if route.rAddr == "" || route.rAddr == "mx" {
 		route.rAddr = getMxRoute(route.qrHost, "&")
 	}
 
@@ -394,7 +400,19 @@ func newSmtpClient(route Route) (client *smtp.Client, err error) {
 	tAddrs = strings.Split(route.rAddr, "&")
 	if len(tAddrs) > 1 {
 		for _, tAddr := range tAddrs {
-			rAddrs.PushBack(hostPortToIpPort(tAddr))
+			if tAddr == "mx" {
+				mxs, err := net.LookupMX(route.qrHost)
+				if err != nil {
+					rAddrs.PushBack(net.JoinHostPort(route.qrHost, "25"))
+				} else {
+					for _, mx := range mxs {
+						rAddrs.PushBack(net.JoinHostPort(mx.Host[0:len(mx.Host)-1], "25"))
+					}
+				}
+			} else {
+				rAddrs.PushBack(hostPortToIpPort(tAddr))
+			}
+
 		}
 	}
 
@@ -414,6 +432,24 @@ func newSmtpClient(route Route) (client *smtp.Client, err error) {
 	// Unique IP/hostname
 	if rAddrs.Len() == 0 { // -> no failover & no roud robin
 		rAddrs.PushBack(hostPortToIpPort(route.rAddr))
+	}
+
+	for rAddr := rAddrs.Front(); rAddr != nil; rAddr = rAddr.Next() {
+		rHost, rPort, _ := net.SplitHostPort(rAddr.Value.(string))
+		//  Try all r address
+		for lAddr := lAddrs.Front(); lAddr != nil; lAddr = lAddr.Next() {
+			// Get HELO host
+			heloHosts, err := net.LookupAddr(lAddr.Value.(string))
+			if err != nil {
+				heloHost = getHeloHost()
+			} else {
+				heloHost = heloHosts[0]
+			}
+			client, err = smtp.Dial(net.JoinHostPort(rHost, rPort), lAddr.Value.(string), heloHost)
+			if err == nil {
+				return client, err
+			}
+		}
 	}
 
 	// Connect ands return client
@@ -468,7 +504,6 @@ func sendmail(sender string, recipients []string, data *string, route Route) {
 	// 2013-06-22 14:19:30.670252500 delivery 196893: deferral: Sorry_but_i_don't_understand_SMTP_response_:_local_error:_unexpected_message_/
 	// 2013-06-18 10:08:29.273083500 delivery 856840: deferral: Sorry_but_i_don't_understand_SMTP_response_:_failed_to_parse_certificate_from_server:_negative_serial_number_/
 	// https://code.google.com/p/go/issues/detail?id=3930
-	// @4000000052d2c8282a519864 delivery 33: deferral: 7da4493fa3fe4b738468241a9e51c769:91.121.228.128:44432->213.199.154.23:25:caeljacqueline@free.fr:eric.escoffier@groupe-avantiel.com:Remote_host_accept_STARTTLS_but_init_TLS_failed_-_local_error:_unexpected_message(#4.4.1)/
 	if ok, _ := c.Extension("STARTTLS"); ok {
 		var config tls.Config
 		config.InsecureSkipVerify = true

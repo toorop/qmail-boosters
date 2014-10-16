@@ -39,10 +39,14 @@
 
 		defaultoutgoingip
 		111.111.111.111
+*/
+
+/*
+TODO
+- 2014-09-08 04:03:04.431716500 delivery 1503: deferral: Sorry_but_i_don't_understand_SMTP_response_:_EOF_/
 
 
 */
-
 package main
 
 import (
@@ -81,6 +85,11 @@ type Route struct {
 type SmtpResponse struct {
 	code int
 	msg  string
+}
+
+type smtpDialresult struct {
+	client *smtp.Client
+	err    error
 }
 
 var (
@@ -434,6 +443,7 @@ func newSmtpClient(route Route) (client *smtp.Client, err error) {
 		rAddrs.PushBack(hostPortToIpPort(route.rAddr))
 	}
 
+	// Test all remote Host
 	for rAddr := rAddrs.Front(); rAddr != nil; rAddr = rAddr.Next() {
 		rHost, rPort, _ := net.SplitHostPort(rAddr.Value.(string))
 		//  Try all r address
@@ -444,15 +454,39 @@ func newSmtpClient(route Route) (client *smtp.Client, err error) {
 				heloHost = getHeloHost()
 			} else {
 				heloHost = heloHosts[0]
+				// Remove trailing dot
+				// Exchange doesn't like absolute FDQN
+				if heloHost[len(heloHost)-1] == 46 {
+					heloHost = heloHost[0 : len(heloHost)-2]
+				}
 			}
-			client, err = smtp.Dial(net.JoinHostPort(rHost, rPort), lAddr.Value.(string), heloHost)
+			// Dial timeout
+			/*connectTimer := time.NewTimer(10 * time.Second)
+			done := make(chan smtpDialresult, 1)
+			go func() {
+				client, err = smtp.Dial(net.JoinHostPort(rHost, rPort), lAddr.Value.(string), heloHost)
+				done <- smtpDialresult{client, err}
+			}()
+
+			// Wait for the read or the timeout
+			select {
+			case r := <-done:
+				if r.err == nil {
+					return r.client, r.err
+				}
+			// Timeout
+			case <-connectTimer.C:
+				continue
+			}*/
+
+			client, err = smtp.Dial(net.JoinHostPort(rHost, rPort), lAddr.Value.(string), heloHost, 10)
 			if err == nil {
 				return client, err
 			}
 		}
 	}
 
-	// Connect ands return client
+	// Teste toutes les adresses locales sir tous les remotes
 	for lAddr := lAddrs.Front(); lAddr != nil; lAddr = lAddr.Next() {
 		// Get HELO host
 		heloHosts, err := net.LookupAddr(lAddr.Value.(string))
@@ -465,7 +499,8 @@ func newSmtpClient(route Route) (client *smtp.Client, err error) {
 		//  //rdsn := fmt.Sprintf("%s:%s", route.rAddr, route.rPort)
 		for rAddr := rAddrs.Front(); rAddr != nil; rAddr = rAddr.Next() {
 			rHost, rPort, _ := net.SplitHostPort(rAddr.Value.(string))
-			client, err = smtp.Dial(fmt.Sprintf("%s:%s", rHost, rPort), lAddr.Value.(string), heloHost)
+			// TODO Dial timeout
+			client, err = smtp.Dial(fmt.Sprintf("%s:%s", rHost, rPort), lAddr.Value.(string), heloHost, 10)
 			if err == nil {
 				return client, err
 			}
@@ -486,6 +521,8 @@ func sendmail(sender string, recipients []string, data *string, route Route) {
 	}
 
 	// Timeout connect 240 seconds
+	// TODO c'est trop court car si on a une sortie bloquée le dial va lui même se mettre
+	// en timoute au bout de X secondes
 	timeoutCon := make(chan bool, 1)
 	go timeout(timeoutCon, 240)
 	go doTimeout(timeoutCon, fmt.Sprintf("%s", route.rAddr))

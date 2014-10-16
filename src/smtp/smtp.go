@@ -20,6 +20,7 @@ import (
 	"net"
 	"net/textproto"
 	"strings"
+	"time"
 )
 
 // A Client represents a client connection to an SMTP server.
@@ -47,9 +48,18 @@ type Client struct {
 }
 
 // Dial returns a new Client connected to an SMTP server at addr.
-// change dial method to allow localAddr parameter
+// change dial method to :
+//  - allow localAddr parameter
+//  - add timeout
 // func DialTCP(net string, laddr, raddr *TCPAddr) (*TCPConn, error)
-func Dial(remoteAddr string, localAddr string, heloHost string) (*Client, error) {
+
+// dialChan represente la structuer retournée par la commande dial
+type dialChan struct {
+	conn *net.TCPConn
+	err  error
+}
+
+func Dial(remoteAddr string, localAddr string, heloHost string, timeout int) (*Client, error) {
 	raddr, err := net.ResolveTCPAddr("tcp", remoteAddr)
 	if err != nil {
 		return nil, err
@@ -64,14 +74,35 @@ func Dial(remoteAddr string, localAddr string, heloHost string) (*Client, error)
 		}
 	}
 
-	conn, err := net.DialTCP("tcp", laddr, raddr)
+	// Dial timeout
+	connectTimer := time.NewTimer(time.Duration(timeout) * time.Second)
+	done := make(chan dialChan, 1)
+	go func() {
+		conn, err := net.DialTCP("tcp", laddr, raddr)
+		done <- dialChan{conn, err}
+	}()
 
-	//conn, err := net.Dial("tcp", addr)
+	// Wait for the conn or  timeout
+	select {
+	case r := <-done:
+		if r.err == nil {
+			host := remoteAddr[:strings.Index(remoteAddr, ":")]
+			return NewClient(r.conn, host, heloHost)
+		} else {
+			return nil, r.err
+		}
+	// Timeout
+	case <-connectTimer.C:
+		return nil, errors.New("Timeout")
+	}
+
+	/*conn, err := net.DialTCP("tcp", laddr, raddr)
+
 	if err != nil {
 		return nil, err
 	}
 	host := remoteAddr[:strings.Index(remoteAddr, ":")]
-	return NewClient(conn, host, heloHost)
+	return NewClient(conn, host, heloHost)*/
 }
 
 // NewClient returns a new Client using an existing connection and host as a

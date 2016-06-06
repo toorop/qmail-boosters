@@ -1,0 +1,6 @@
+#!/bin/sh
+
+set -e
+
+GOOS=linux GOARCH=amd64 CGO_ENABLED=0 go build -o bin/qmail-remote-linux-64 qmail-remote.go
+echo "hello world" | bin/qmail-remote-linux-64 toorop.fr toorop@toorop.fr toorop@toorop.fr

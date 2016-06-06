@@ -178,6 +178,11 @@ func tempTLSFailed(lAddr, dsn, msg string) {
 	zerodie()
 }
 
+func tempResolveHostFailed(host string, err error) {
+	fmt.Printf("Z%s:%s:%s:Sorry, I couldn't resolve this hostname %s - %s (#4.4.1)\n", qbUUID, sender, strings.Join(recipients, ","), host, err.Error())
+	zerodie()
+}
+
 func permNoMx(host string) {
 	fmt.Printf("D%s:%s:%s:Sorry, I couldn't find a mail exchanger or IP address for host %s. (#5.4.4)\n", qbUUID, sender, strings.Join(recipients, ","), host)
 	zerodie()
@@ -334,6 +339,7 @@ func getMxRoute(host, sep string) (route string) {
 			}
 		}
 	}
+
 	return
 }
 
@@ -344,8 +350,11 @@ func hostPortToIPPort(dsnHost string) (dnsIP string) {
 	if net.ParseIP(host) == nil {
 		t, err := net.LookupHost(host)
 		if err != nil {
-			// TODO temp fail
-			permResolveHostFailed(host)
+			if isNoSuchHostErr(err) {
+				permResolveHostFailed(host)
+			} else {
+				tempResolveHostFailed(host, err)
+			}
 		} else {
 			return net.JoinHostPort(t[0], port)
 		}
@@ -361,7 +370,8 @@ func getDefaultLocalAddr() (lAddr string) {
 	return ip[0]
 }
 
-func newSmtpClient(route Route) (client *smtp.Client, err error) {
+// newSMTPClient return a SMTP client
+func newSMTPClient(route Route) (client *smtp.Client, err error) {
 	var tAddrs []string // temp address slices
 	var heloHost string
 	lAddrs := list.New() // Local addresses
@@ -534,7 +544,7 @@ func sendmail(sender string, recipients []string, data *string, route Route) {
 	go doTimeout(timeoutCon, fmt.Sprintf("%s", route.rAddr))
 
 	// Connect
-	c, err := newSmtpClient(route)
+	c, err := newSMTPClient(route)
 
 	if err != nil {
 		tempNoCon(fmt.Sprintf("%s", route.rAddr), err)
@@ -554,7 +564,7 @@ func sendmail(sender string, recipients []string, data *string, route Route) {
 		err = c.StartTLS(&config)
 		if err != nil { // fallback to no TLS
 			c.Quit()
-			c, err = newSmtpClient(route)
+			c, err = newSMTPClient(route)
 			if err != nil {
 				tempNoCon(dsn, err)
 			}
@@ -678,7 +688,21 @@ func sendmail(sender string, recipients []string, data *string, route Route) {
 	c.Quit()
 }
 
+// isNoSuchHostErr check if err is a "no such host" error
+func isNoSuchHostErr(err error) bool {
+	if strings.Contains(err.Error(), "no such host") {
+		return true
+	}
+	return false
+}
+
 func main() {
+	hosts, err := net.LookupHost("tararararararra.com")
+	fmt.Println(hosts, err)
+	if isNoSuchHostErr(err) {
+		fmt.Println("no such host")
+	}
+	os.Exit(0)
 	// Parse command-line
 	// qmail-remote host sender recip [ recip ... ]
 	flag.Parse()

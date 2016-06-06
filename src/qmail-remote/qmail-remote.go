@@ -57,7 +57,6 @@ import (
 	"errors"
 	"flag"
 	"fmt"
-	"github.com/Toorop/qmail-boosters/src/smtp"
 	"io/ioutil"
 	"math/rand"
 	"net"
@@ -66,12 +65,16 @@ import (
 	"strconv"
 	"strings"
 	"time"
+
+	"github.com/toorop/qmail-boosters/src/smtp"
 )
 
 const (
+	// ZEROBYTE is the zero byte
 	ZEROBYTE byte = 0
 )
 
+// Route represents a SMTP route
 type Route struct {
 	name  string
 	rAddr string // remote IPs or Hostnames
@@ -82,7 +85,8 @@ type Route struct {
 	qrHost   string // host in qmail-remote cmd
 }
 
-type SmtpResponse struct {
+// SMTPResponse représents a SMTP responses
+type SMTPResponse struct {
 	code int
 	msg  string
 }
@@ -95,7 +99,7 @@ type smtpDialresult struct {
 var (
 	sender     string
 	recipients []string
-	qbUuid     string
+	qbUUID     string
 )
 
 func zero() {
@@ -120,22 +124,22 @@ func dieUsage() {
 }
 
 func dieRead() {
-	fmt.Printf("Z%s:%s:%s:Unable to read message. (#4.3.0)\n", qbUuid, sender, strings.Join(recipients, ","))
+	fmt.Printf("Z%s:%s:%s:Unable to read message. (#4.3.0)\n", qbUUID, sender, strings.Join(recipients, ","))
 	zerodie()
 }
 
 func dieControl(msg string) {
-	fmt.Printf("Z%s:%s:%s:Unable to read control files: %s (#4.3.0)\n", qbUuid, sender, strings.Join(recipients, ","), msg)
+	fmt.Printf("Z%s:%s:%s:Unable to read control files: %s (#4.3.0)\n", qbUUID, sender, strings.Join(recipients, ","), msg)
 	zerodie()
 }
 
 func dieControlRoutes() {
-	fmt.Printf("Z%s:%s:%s:Unable to read control file 'routes'. Bad format or file not found (#4.3.0)\n", qbUuid, sender, strings.Join(recipients, ","))
+	fmt.Printf("Z%s:%s:%s:Unable to read control file 'routes'. Bad format or file not found (#4.3.0)\n", qbUUID, sender, strings.Join(recipients, ","))
 	zerodie()
 }
 
 func dieControlRoutesDefaultAsNameIsForbidden() {
-	fmt.Printf("Z%s:%s:%s:Name 'default' for a route is forbidden (#4.3.0)\n", qbUuid, sender, strings.Join(recipients, ","))
+	fmt.Printf("Z%s:%s:%s:Name 'default' for a route is forbidden (#4.3.0)\n", qbUUID, sender, strings.Join(recipients, ","))
 	zerodie()
 }
 
@@ -154,38 +158,38 @@ func dieRouteNotFound(route string) {
 	zerodie()
 }
 
-func dieBadSmtpResponse(response string) {
+func dieBadSMTPResponse(response string) {
 	fmt.Printf("ZSorry but i don't understand SMTP response : %s \n", response)
 	zerodie()
 }
 
 func tempNoCon(dsn string, err error) {
-	fmt.Printf("Z%s:%s:%s:Sorry, I wasn't able to establish an SMTP connection to remote host(s) %s. %s (#4.4.1)\n", qbUuid, sender, strings.Join(recipients, ","), dsn, err)
+	fmt.Printf("Z%s:%s:%s:Sorry, I wasn't able to establish an SMTP connection to remote host(s) %s. %s (#4.4.1)\n", qbUUID, sender, strings.Join(recipients, ","), dsn, err)
 	zerodie()
 }
 
 func tempTimeout(dsn string) {
-	fmt.Printf("Z%s:%s:%s:Sorry, timeout occured while speaking to %s. (#4.4.1)\n", qbUuid, sender, strings.Join(recipients, ","), dsn)
+	fmt.Printf("Z%s:%s:%s:Sorry, timeout occured while speaking to %s. (#4.4.1)\n", qbUUID, sender, strings.Join(recipients, ","), dsn)
 	zerodie()
 }
 
-func tempTlsFailed(lAddr, dsn, msg string) {
-	fmt.Printf("Z%s:%s->%s:%s:%s:Remote host accept STARTTLS but init TLS failed - %s(#4.4.1)\n", qbUuid, lAddr, dsn, sender, strings.Join(recipients, ","), msg)
+func tempTLSFailed(lAddr, dsn, msg string) {
+	fmt.Printf("Z%s:%s->%s:%s:%s:Remote host accept STARTTLS but init TLS failed - %s(#4.4.1)\n", qbUUID, lAddr, dsn, sender, strings.Join(recipients, ","), msg)
 	zerodie()
 }
 
 func permNoMx(host string) {
-	fmt.Printf("D%s:%s:%s:Sorry, I couldn't find a mail exchanger or IP address for host %s. (#5.4.4)\n", qbUuid, sender, strings.Join(recipients, ","), host)
+	fmt.Printf("D%s:%s:%s:Sorry, I couldn't find a mail exchanger or IP address for host %s. (#5.4.4)\n", qbUUID, sender, strings.Join(recipients, ","), host)
 	zerodie()
 }
 
 func permResolveHostFailed(host string) {
-	fmt.Printf("D%s:%s:%s:Sorry, I couldn't resolve this hostname %s. (#5.4.4)\n", qbUuid, sender, strings.Join(recipients, ","), host)
+	fmt.Printf("D%s:%s:%s:Sorry, I couldn't resolve this hostname %s. (#5.4.4)\n", qbUUID, sender, strings.Join(recipients, ","), host)
 	zerodie()
 }
 
 func permNoInterface(iface string) {
-	fmt.Printf("D%s:%s:%s:Sorry, I couldn't find local interface %s. (#5.4.4)\n", qbUuid, sender, strings.Join(recipients, ","), iface)
+	fmt.Printf("D%s:%s:%s:Sorry, I couldn't find local interface %s. (#5.4.4)\n", qbUUID, sender, strings.Join(recipients, ","), iface)
 	zerodie()
 }
 
@@ -195,7 +199,7 @@ func permDebug(msg string) {
 }
 
 func tempAuthFailure(lAddr, dsn, msg string) {
-	fmt.Printf("Z%s:%s->%s:%s:%s:Auth failure (perhaps temp) dialing to host : %s (#5.4.4)\n", qbUuid, lAddr, dsn, sender, strings.Join(recipients, ","), msg)
+	fmt.Printf("Z%s:%s->%s:%s:%s:Auth failure (perhaps temp) dialing to host : %s (#5.4.4)\n", qbUUID, lAddr, dsn, sender, strings.Join(recipients, ","), msg)
 	zerodie()
 }
 
@@ -211,14 +215,14 @@ func doTimeout(timeout chan bool, dsn string) {
 	}
 }
 
-func newSmtpResponse(resp string) (smtpResponse SmtpResponse) {
+func newSMTPResponse(resp string) (SMTPResponse SMTPResponse) {
 	var err error
 	t := strings.Split(resp, " ")
-	smtpResponse.code, err = strconv.Atoi(t[0])
+	SMTPResponse.code, err = strconv.Atoi(t[0])
 	if err != nil {
-		dieBadSmtpResponse(resp)
+		dieBadSMTPResponse(resp)
 	}
-	smtpResponse.msg = strings.Join(t[1:], " ")
+	SMTPResponse.msg = strings.Join(t[1:], " ")
 	return
 }
 
@@ -235,6 +239,7 @@ func readControl(ctrlFile string) (lines []string) {
 		if err != nil {
 			break
 		}
+		line = bytes.TrimSpace(line)
 		if line[0] == 35 || line[0] == 32 {
 			continue
 		}
@@ -333,12 +338,13 @@ func getMxRoute(host, sep string) (route string) {
 }
 
 // toto.com:25 -> 111.111.111.111:25
-func hostPortToIpPort(dsnHost string) (dnsIp string) {
+func hostPortToIPPort(dsnHost string) (dnsIP string) {
 	host, port, _ := net.SplitHostPort(dsnHost)
 	// If hostname get IP
 	if net.ParseIP(host) == nil {
 		t, err := net.LookupHost(host)
 		if err != nil {
+			// TODO temp fail
 			permResolveHostFailed(host)
 		} else {
 			return net.JoinHostPort(t[0], port)
@@ -419,7 +425,7 @@ func newSmtpClient(route Route) (client *smtp.Client, err error) {
 					}
 				}
 			} else {
-				rAddrs.PushBack(hostPortToIpPort(tAddr))
+				rAddrs.PushBack(hostPortToIPPort(tAddr))
 			}
 
 		}
@@ -433,14 +439,14 @@ func newSmtpClient(route Route) (client *smtp.Client, err error) {
 			rand.Seed(time.Now().UTC().UnixNano())
 			for len(tAddrs) > 0 {
 				i = rand.Intn(len(tAddrs))
-				rAddrs.PushBack(hostPortToIpPort(tAddrs[i]))
+				rAddrs.PushBack(hostPortToIPPort(tAddrs[i]))
 				tAddrs = append(tAddrs[:i], tAddrs[i+1:]...)
 			}
 		}
 	}
 	// Unique IP/hostname
 	if rAddrs.Len() == 0 { // -> no failover & no roud robin
-		rAddrs.PushBack(hostPortToIpPort(route.rAddr))
+		rAddrs.PushBack(hostPortToIPPort(route.rAddr))
 	}
 
 	// Test all remote Host
@@ -514,10 +520,10 @@ func sendmail(sender string, recipients []string, data *string, route Route) {
 	bufh := bytes.NewBufferString(*data)
 	mailmsg, e := mail.ReadMessage(bufh)
 	if e == nil {
-		qbUuid = mailmsg.Header.Get("X-QB-UUID")
+		qbUUID = mailmsg.Header.Get("X-QB-UUID")
 	}
-	if qbUuid == "" {
-		qbUuid = "nouuid" // default
+	if qbUUID == "" {
+		qbUUID = "nouuid" // default
 	}
 
 	// Timeout connect 240 seconds
@@ -581,31 +587,31 @@ func sendmail(sender string, recipients []string, data *string, route Route) {
 
 	if err := c.Mail(sender); err != nil {
 		c.Quit()
-		smtpR := newSmtpResponse(err.Error())
+		smtpR := newSMTPResponse(err.Error())
 		if smtpR.code >= 500 {
 			out("D")
 		} else {
 			out("Z")
 		}
-		out(fmt.Sprintf("%s:%s->%s:%s:%s:Connected to remote host but sender was rejected. %s.\n", qbUuid, c.Laddr, dsn, sender, strings.Join(recipients, ","), smtpR.msg))
+		out(fmt.Sprintf("%s:%s->%s:%s:%s:Connected to remote host but sender was rejected. %s.\n", qbUUID, c.Laddr, dsn, sender, strings.Join(recipients, ","), smtpR.msg))
 		zerodie()
 	}
 
 	flagAtLeastOneRecipitentSuccess := false
 	for _, rcptto := range recipients {
 		if err := c.Rcpt(rcptto); err != nil {
-			smtpR := newSmtpResponse(err.Error())
+			smtpR := newSMTPResponse(err.Error())
 			if smtpR.code >= 500 {
 				out("h")
 			} else { // code >=400
 				out("s")
 			}
-			out(fmt.Sprintf("%s:%s->%s:%s:%s:", qbUuid, c.Laddr, dsn, sender, rcptto))
+			out(fmt.Sprintf("%s:%s->%s:%s:%s:", qbUUID, c.Laddr, dsn, sender, rcptto))
 			out(" does not like recipient.")
 			out(smtpR.msg)
 		} else {
 			out("r")
-			out(fmt.Sprintf("%s:%s->%s:%s:%s:recipient accepted.", qbUuid, c.Laddr, dsn, sender, rcptto))
+			out(fmt.Sprintf("%s:%s->%s:%s:%s:recipient accepted.", qbUUID, c.Laddr, dsn, sender, rcptto))
 			flagAtLeastOneRecipitentSuccess = true
 		}
 		zero()
@@ -622,7 +628,7 @@ func sendmail(sender string, recipients []string, data *string, route Route) {
 
 	w, err := c.Data()
 	if err != nil {
-		smtpR := newSmtpResponse(err.Error())
+		smtpR := newSMTPResponse(err.Error())
 		if smtpR.code >= 500 {
 			out("D")
 		} else { // code >=400
@@ -648,7 +654,7 @@ func sendmail(sender string, recipients []string, data *string, route Route) {
 	err = w.Close()
 	msg := err.Error()
 	if msg[0] == 49 { // 1Ò
-		smtpR := newSmtpResponse(msg[1:])
+		smtpR := newSMTPResponse(msg[1:])
 		if smtpR.code >= 500 {
 			out("D")
 		} else { // code >=400

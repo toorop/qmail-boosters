@@ -697,12 +697,6 @@ func isNoSuchHostErr(err error) bool {
 }
 
 func main() {
-	hosts, err := net.LookupHost("tararararararra.com")
-	fmt.Println(hosts, err)
-	if isNoSuchHostErr(err) {
-		fmt.Println("no such host")
-	}
-	os.Exit(0)
 	// Parse command-line
 	// qmail-remote host sender recip [ recip ... ]
 	flag.Parse()

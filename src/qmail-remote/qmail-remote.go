@@ -258,7 +258,7 @@ func readControl(ctrlFile string) (lines []string) {
 
 func getHeloHost() (heloHost string) {
 	t := readControl("control/me")
-	heloHost = strings.Trim(t[0], " ")
+	heloHost = strings.TrimSpace(t[0])
 	return
 }
 
@@ -473,7 +473,7 @@ func newSMTPClient(route Route) (client *smtp.Client, err error) {
 				// Remove trailing dot
 				// Exchange doesn't like absolute FDQN
 				if heloHost[len(heloHost)-1] == 46 {
-					heloHost = heloHost[0 : len(heloHost)-2]
+					heloHost = heloHost[0 : len(heloHost)-1]
 				}
 			}
 			// Dial timeout
@@ -502,7 +502,7 @@ func newSMTPClient(route Route) (client *smtp.Client, err error) {
 		}
 	}
 
-	// Teste toutes les adresses locales sir tous les remotes
+	// Teste toutes les adresses locales sur tous les remotes
 	for lAddr := lAddrs.Front(); lAddr != nil; lAddr = lAddr.Next() {
 		// Get HELO host
 		heloHosts, err := net.LookupAddr(lAddr.Value.(string))
@@ -510,6 +510,11 @@ func newSMTPClient(route Route) (client *smtp.Client, err error) {
 			heloHost = getHeloHost()
 		} else {
 			heloHost = heloHosts[0]
+			// Remove trailing dot
+			// Exchange doesn't like absolute FDQN
+			if heloHost[len(heloHost)-1] == 46 {
+				heloHost = heloHost[0 : len(heloHost)-1]
+			}
 		}
 		//  Try all r address
 		//  //rdsn := fmt.Sprintf("%s:%s", route.rAddr, route.rPort)

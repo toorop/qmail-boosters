@@ -527,7 +527,7 @@ func newSMTPClient(route Route) (client *smtp.Client, err error) {
 			}
 		}
 	}
-	return client, errors.New("All local address have been tested")
+	return client, errors.New("all local addresses have been tested on all remote hosts")
 }
 
 func sendmail(sender string, recipients []string, data *string, route Route) {
@@ -552,7 +552,7 @@ func sendmail(sender string, recipients []string, data *string, route Route) {
 	c, err := newSMTPClient(route)
 
 	if err != nil {
-		tempNoCon(fmt.Sprintf("%s", route.rAddr), err)
+		tempNoCon(fmt.Sprintf("%s -> %s", route.lAddr, route.rAddr), err)
 	}
 	dsn := fmt.Sprintf("%s:%s", c.Raddr, c.Rport)
 	defer c.Quit()
@@ -571,7 +571,8 @@ func sendmail(sender string, recipients []string, data *string, route Route) {
 			c.Quit()
 			c, err = newSMTPClient(route)
 			if err != nil {
-				tempNoCon(dsn, err)
+				tempNoCon(fmt.Sprintf("%s -> %s", route.lAddr, route.rAddr), err)
+				//tempNoCon(dsn, err)
 			}
 			defer c.Quit()
 			//tempTlsFailed(c.Laddr, dsn, err.Error())

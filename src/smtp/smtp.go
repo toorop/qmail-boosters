@@ -60,7 +60,7 @@ type dialChan struct {
 }
 
 func Dial(remoteAddr string, localAddr string, heloHost string, timeout int) (*Client, error) {
-	raddr, err := net.ResolveTCPAddr("tcp", remoteAddr)
+	raddr, err := net.ResolveTCPAddr("tcp4", remoteAddr)
 	if err != nil {
 		return nil, err
 	}
@@ -153,7 +153,6 @@ func (c *Client) helo() error {
 func (c *Client) ehlo() error {
 	cmd := fmt.Sprintf("EHLO %s", c.heloHost)
 	_, msg, err := c.cmd(250, cmd)
-	//fmt.Println(t, msg, err)
 	if err != nil {
 		return err
 	}
